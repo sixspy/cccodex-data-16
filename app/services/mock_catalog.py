@@ -12,6 +12,17 @@ CATALOGS = {
         {"sku": "B-101", "title": "泵站运行日报"},
         {"sku": "B-102", "title": "雨污分流抽检单"},
     ],
+    # 异常演练目录：缺号、短题、号相撞，以及复合异常（用于优先级验收）
+    "/mock/catalog/gamma": [
+        {"sku": "G-001", "title": "管网压力监测月报"},      # 正常
+        {"sku": "", "title": "无人值守泵站巡检记录簿"},      # 缺号
+        {"sku": "G-002", "title": "台账"},                  # 短题
+        {"sku": "G-003", "title": "河道排口溯源排查表"},    # 正常
+        {"sku": "G-003", "title": "积水点改造验收汇总表"},  # 号相撞
+        {"sku": "G-004", "title": "单"},                    # 短题 + 号相撞（同号再来一行）
+        {"sku": "G-004", "title": "泵"},                    # 号相撞压过短题
+        {"sku": "", "title": "短"},                        # 缺号压过短题
+    ],
 }
 
 
@@ -41,7 +52,7 @@ def parse_catalog_html(html: str, seed_path: str) -> list[dict]:
     import re
 
     pattern = re.compile(
-        r"<li\s+data-sku='([^']+)'\s*>([^<]+)</li>",
+        r"<li\s+data-sku='([^']*)'\s*>([^<]+)</li>",
         re.IGNORECASE,
     )
     out = []

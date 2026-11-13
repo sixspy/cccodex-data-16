@@ -4,7 +4,8 @@
 <p><a href="{{ url_for('jobs.list_jobs') }}">← 返回列表</a></p>
 <section class="card">
   <h1>{{ job.name }}</h1>
-  <p>种子 <code>{{ job.seed_path }}</code> · 状态 <span class="tag {{ job.status }}">{{ job.status }}</span></p>
+  <p>种子 <code>{{ job.seed_path }}</code> · 状态
+    <span class="tag {{ job.status }}">{{ job.status }}</span></p>
   {% if job.status == 'draft' %}
   <form method="post" action="{{ url_for('jobs.run_job_view', job_id=job.id) }}">
     <button type="submit">运行采集（同步）</button>
@@ -13,17 +14,179 @@
   <p class="muted">已完成于 {{ job.finished_at or '—' }}</p>
   {% endif %}
 </section>
+
 <section class="card">
-  <h2>落库记录</h2>
+  <h2>当日口径与件数</h2>
+  <div class="stat-row">
+    <div class="stat missing">
+      <span class="stat-num">{{ bucket_counts['missing'] }}</span>
+      <span class="stat-label">缺号筐</span>
+    </div>
+    <div class="stat collision">
+      <span class="stat-num">{{ bucket_counts['collision'] }}</span>
+      <span class="stat-label">号相撞筐</span>
+    </div>
+    <div class="stat short">
+      <span class="stat-num">{{ bucket_counts['short'] }}</span>
+      <span class="stat-label">短题筐</span>
+    </div>
+    <div class="stat review">
+      <span class="stat-num">{{ review_count }}</span>
+      <span class="stat-label">复核栏</span>
+    </div>
+  </div>
+  <p class="muted">
+    当日冲突处理口径：
+    {% if job.conflict_policy %}
+      <strong>{{ '整笔失败退回短题筐 (reject)' if job.conflict_policy == 'reject'
+                 else '生成冲突副本留复核栏禁止入账 (copy)' }}</strong>
+      <span class="locked">（已锁定，不可改口）</span>
+    {% else %}
+      <span class="muted">尚未锁定</span>
+    {% endif %}
+  </p>
+  <form method="post" action="{{ url_for('jobs.set_policy', job_id=job.id) }}" class="inline-form">
+    <label class="inline">口径
+      <select name="conflict_policy" {% if job.conflict_policy %}disabled{% endif %}>
+        <option value="reject" {{ 'selected' if job.conflict_policy == 'reject' }}>reject：整笔失败退回短题筐</option>
+        <option value="copy" {{ 'selected' if job.conflict_policy == 'copy' }}>copy：冲突副本留复核栏禁止入账</option>
+      </select>
+    </label>
+    <button type="submit" {% if job.conflict_policy %}disabled{% endif %}>
+      {{ '口径已锁定' if job.conflict_policy else '锁定口径' }}
+    </button>
+  </form>
+  <p class="muted">优先级：缺号 压过 号相撞 压过 短题，一行只进一筐。仅短题可改判。</p>
+</section>
+
+<section class="card">
+  <h2>异常三筐</h2>
+  {% for key in ['missing', 'collision', 'short'] %}
+  <h3 class="bucket-head {{ key }}">
+    {{ bucket_labels[key] }}筐
+    <span class="count-pill">{{ bucket_counts[key] }}</span>
+    {% if key != 'short' %}<span class="muted">（无改判入口）</span>{% endif %}
+  </h3>
+  <table class="bucket-table">
+    <thead>
+      <tr><th>源序</th><th>编码</th><th>标题</th><th>筐内状态</th><th>原因 / 优先说明 / 复核结果</th>
+        {% if key == 'short' %}<th>改判</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in buckets if b['bucket'] == key %}
+      <tr>
+        <td>{{ b.source_index }}</td>
+        <td><code>{{ b.sku or '（空）' }}</code></td>
+        <td>{{ b.title }}</td>
+        <td><span class="tag {{ b.row_status }}">{{ b.row_status }}</span></td>
+        <td class="detail-cell">
+          <details>
+            <summary>查看</summary>
+            <p class="reason">{{ b.reason }}</p>
+            <p class="muted">优先说明：{{ b.priority_note }}</p>
+            {% set linked = reviews | selectattr('bucket_id', 'equalto', b.id) | list %}
+            {% for r in linked %}
+            <p class="review-note {{ r.review_status }}">
+              复核结果【{{ r.review_status }}】：{{ r.result_note or '待复核' }}
+            </p>
+            {% endfor %}
+          </details>
+        </td>
+        {% if key == 'short' %}
+        <td>
+          {% if b.row_status in appealable_statuses %}
+          <form method="post" action="{{ url_for('jobs.appeal', job_id=job.id) }}" class="appeal-form">
+            <input type="hidden" name="bucket_id" value="{{ b.id }}" />
+            <input name="proposed_sku" placeholder="拟入账编码" required />
+            <input name="reason" placeholder="改判原因（必填）" required />
+            <button type="submit">申请改判</button>
+          </form>
+          {% else %}
+          <span class="muted">{{ '复核中' if b.row_status == 'in_review' else '已入账' }}</span>
+          {% endif %}
+        </td>
+        {% endif %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 6 if key == 'short' else 5 }}" class="muted">本筐无记录</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <h2>复核栏 <span class="count-pill">{{ review_count }}</span>
+    <span class="muted">（活动 {{ review_active | length }} 笔）</span>
+  </h2>
+  <table>
+    <thead>
+      <tr><th>ID</th><th>短题行</th><th>拟入账编码</th><th>改判原因</th>
+        <th>锁定口径</th><th>状态</th><th>复核结果</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for r in reviews %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>#{{ r.bucket_id }}</td>
+        <td><code>{{ r.proposed_sku }}</code></td>
+        <td>{{ r.reason_text }}</td>
+        <td>{{ r.locked_policy }}</td>
+        <td><span class="tag {{ r.review_status }}">{{ r.review_status }}</span></td>
+        <td class="detail-cell">
+          <details><summary>查看</summary><p>{{ r.result_note or '—' }}</p></details>
+        </td>
+        <td>
+          {% if r.review_status in ['pending', 'failed'] %}
+          <form method="post" action="{{ url_for('jobs.approve', review_id=r.id) }}" class="inline-form">
+            <input type="hidden" name="conflict_policy" value="{{ r.locked_policy }}" />
+            <button type="submit">通过</button>
+          </form>
+          <form method="post" action="{{ url_for('jobs.reject', review_id=r.id) }}" class="inline-form">
+            <input name="note" placeholder="驳回说明" />
+            <button type="submit" class="btn-secondary">驳回</button>
+          </form>
+          {% elif r.review_status == 'conflict' %}
+          <span class="muted">冲突副本，禁止入账</span>
+          {% else %}
+          <span class="muted">已结案</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">复核栏为空</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>账册 <span class="count-pill">{{ ledger | length }}</span></h2>
+  <table>
+    <thead><tr><th>编码</th><th>标题</th><th>来源</th><th>入账时间</th></tr></thead>
+    <tbody>
+      {% for l in ledger %}
+      <tr>
+        <td><code>{{ l.sku }}</code></td>
+        <td>{{ l.title }}</td>
+        <td>{{ l.source }}</td>
+        <td>{{ l.created_at }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">账册为空</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>原始落库记录（crawl_records）</h2>
   <table>
     <thead><tr><th>item_key</th><th>标题</th><th>时间</th></tr></thead>
     <tbody>
       {% for r in records %}
-      <tr>
-        <td><code>{{ r.item_key }}</code></td>
-        <td>{{ r.title }}</td>
-        <td>{{ r.fetched_at }}</td>
-      </tr>
+      <tr><td><code>{{ r.item_key }}</code></td><td>{{ r.title }}</td><td>{{ r.fetched_at }}</td></tr>
       {% else %}
       <tr><td colspan="3" class="muted">尚无记录</td></tr>
       {% endfor %}
